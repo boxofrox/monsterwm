@@ -17,24 +17,28 @@
 #define DEFAULT_MODE    TILE      /* initial layout/mode: TILE MONOCLE BSTACK GRID FLOAT */
 #define ATTACH_ASIDE    True      /* False means new window is master */
 #define FOLLOW_WINDOW   False     /* follow the window when moved to a different desktop */
+#define FOLLOW_MONITOR  False     /* follow the window when moved to a different monitor */
 #define FOLLOW_MOUSE    False     /* focus the window the mouse just entered */
 #define CLICK_TO_FOCUS  True      /* focus an unfocused window when clicked  */
 #define FOCUS_BUTTON    Button3   /* mouse button to be used along with CLICK_TO_FOCUS */
 #define BORDER_WIDTH    2         /* window border width */
 #define FOCUS           "#ff950e" /* focused window border color    */
 #define UNFOCUS         "#444444" /* unfocused window border color  */
+#define INFOCUS         "#9c3885" /* focused window border color on unfocused monitor */
 #define MINWSZ          50        /* minimum window size in pixels  */
 #define DEFAULT_DESKTOP 0         /* the desktop to focus initially */
 #define DESKTOPS        4         /* number of desktops - edit DESKTOPCHANGE keys to suit */
 
 /**
- * open applications to specified desktop with specified mode.
+ * open applications to specified monitor and desktop
+ * with the specified properties.
+ * if monitor is negative, then current is assumed
  * if desktop is negative, then current is assumed
  */
 static const AppRule rules[] = { \
-    /*  class     desktop  follow  float */
-    { "MPlayer",     3,    True,   False },
-    { "Gimp",        0,    False,  True  },
+    /*  class     monitor  desktop  follow  float */
+    { "MPlayer",     0,       3,    True,   False },
+    { "Gimp",        1,       0,    False,  True  },
 };
 
 /* helper for spawning shell commands */
@@ -46,6 +50,10 @@ static const AppRule rules[] = { \
  */
 static const char *termcmd[] = { "xterm",     NULL };
 static const char *menucmd[] = { "dmenu_run", NULL };
+
+#define MONITORCHANGE(K,N) \
+    {  MOD4,             K,              change_monitor, {.i = N}}, \
+    {  MOD4|ShiftMask,   K,              client_to_monitor, {.i = N}},
 
 #define DESKTOPCHANGE(K,N) \
     {  MOD1,             K,              change_desktop, {.i = N}}, \
@@ -94,6 +102,8 @@ static Key keys[] = {
        DESKTOPCHANGE(    XK_F2,                             1)
        DESKTOPCHANGE(    XK_F3,                             2)
        DESKTOPCHANGE(    XK_F4,                             3)
+       MONITORCHANGE(    XK_F1,                             0)
+       MONITORCHANGE(    XK_F2,                             1)
 };
 
 /**
