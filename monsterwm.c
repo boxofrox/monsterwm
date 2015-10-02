@@ -151,7 +151,7 @@ typedef struct {
  * desktops    - the desktops handled by the monitor
  */
 typedef struct Monitor {
-    int x, y, h, w, currdeskidx;
+    int x, y, h, w, currdeskidx, prevdeskidx;
     Desktop desktops[DESKTOPS];
 } Monitor;
 
@@ -199,10 +199,10 @@ static int xerrorstart(Display *dis, XErrorEvent *ee);
  * wmatoms      - array holding atoms for ICCCM support
  * netatoms     - array holding atoms for EWMH support
  * desktops     - array of managed desktops
- * currdeskidx  - which desktop is currently active
+ * currmonidx   - which monitor is currently active
  */
 static Bool running = True;
-static int nmonitors, currmonidx;
+static int nmonitors, currmonidx, retval;
 static unsigned int numlockmask, win_focus, win_unfocus, win_infocus;
 static Display *dis;
 static Window root;
@@ -294,7 +294,7 @@ void buttonpress(XEvent *e) {
 void change_desktop(const Arg *arg) {
     Monitor *m = &monitors[currmonidx];
     if (arg->i == m->currdeskidx || arg->i < 0 || arg->i >= DESKTOPS) return;
-    Desktop *d = &m->desktops[m->currdeskidx], *n = &m->desktops[(m->currdeskidx = arg->i)];
+    Desktop *d = &m->desktops[(m->prevdeskidx = m->currdeskidx)], *n = &m->desktops[(m->currdeskidx = arg->i)];
     if (n->curr) XMapWindow(dis, n->curr->win);
     for (Client *c = n->head; c; c = c->next) XMapWindow(dis, c->win);
     XChangeWindowAttributes(dis, root, CWEventMask, &(XSetWindowAttributes){.do_not_propagate_mask = SubstructureNotifyMask});
@@ -654,11 +654,12 @@ void focusin(XEvent *e) {
  * first look in the current desktop then on other desktops
  */
 void focusurgent(void) {
+    Monitor *m = &monitors[currmonidx];
     Client *c = NULL;
     int d = -1;
-    for (c = desktops[currdeskidx].head; c && !c->isurgn; c = c->next);
-    while (!c && d < DESKTOPS-1) for (c = desktops[++d].head; c && !c->isurgn; c = c->next);
-    if (c) { if (d != -1) change_desktop(&(Arg){.i = d}); focus(c, &desktops[currdeskidx]); }
+    for (c = m->desktops[m->currdeskidx].head; c && !c->isurgn; c = c->next);
+    while (!c && d < DESKTOPS-1) for (c = m->desktops[++d].head; c && !c->isurgn; c = c->next);
+    if (c) { if (d != -1) change_desktop(&(Arg){.i = d}); focus(c, &m->desktops[m->currdeskidx], m); }
 }
 
 /**
@@ -758,10 +759,10 @@ void killclient(void) {
 }
 
 /**
- * focus the previously/last focused desktop
+ * focus the previously focused desktop
  */
 void last_desktop(void) {
-    change_desktop(&(Arg){.i = prevdeskidx});
+    change_desktop(&(Arg){.i = monitors[currmonidx].prevdeskidx});
 }
 
 /**
@@ -1037,9 +1038,10 @@ void removeclient(Client *c, Desktop *d, Monitor *m) {
  * stack clients. the size of a window can't be less than MINWSZ
  */
 void resize_master(const Arg *arg) {
-    Desktop *d = &desktops[currdeskidx];
-    int msz = (d->mode == BSTACK ? wh:ww) * MASTER_SIZE + (d->masz += arg->i);
-    if (msz >= MINWSZ && (d->mode == BSTACK ? wh:ww) - msz >= MINWSZ) tile(d);
+    Monitor *m = &monitors[currmonidx];
+    Desktop *d = &m->desktops[m->currdeskidx];
+    int msz = (d->mode == BSTACK ? m->h:m->w) * MASTER_SIZE + (d->masz += arg->i);
+    if (msz >= MINWSZ && (d->mode == BSTACK ? m->h:m->w) - msz >= MINWSZ) tile(d, m);
     else d->masz -= arg->i; /* reset master area size */
 }
 
@@ -1047,24 +1049,25 @@ void resize_master(const Arg *arg) {
  * resize the first stack window
  */
 void resize_stack(const Arg *arg) {
-    desktops[currdeskidx].sasz += arg->i;
-    tile(&desktops[currdeskidx]);
+    monitors[currmonidx].desktops[monitors[currmonidx].currdeskidx].sasz += arg->i;
+    tile(&monitors[currmonidx].desktops[monitors[currmonidx].currdeskidx], &monitors[currmonidx]);
 }
 
 /**
  * jump and focus the next or previous desktop
  */
 void rotate(const Arg *arg) {
-    change_desktop(&(Arg){.i = (DESKTOPS + currdeskidx + arg->i) % DESKTOPS});
+    change_desktop(&(Arg){.i = (DESKTOPS + monitors[currmonidx].currdeskidx + arg->i) % DESKTOPS});
 }
 
 /**
  * jump and focus the next non-empty desktop
  */
 void rotate_filled(const Arg *arg) {
+    Monitor *m = &monitors[currmonidx];
     int n = arg->i;
-    while (n < DESKTOPS && !desktops[(DESKTOPS + currdeskidx + n) % DESKTOPS].head) (n += arg->i);
-    change_desktop(&(Arg){.i = (DESKTOPS + currdeskidx + n) % DESKTOPS});
+    while (n < DESKTOPS && !m->desktops[(DESKTOPS + m->currdeskidx + n) % DESKTOPS].head) (n += arg->i);
+    change_desktop(&(Arg){.i = (DESKTOPS + m->currdeskidx + n) % DESKTOPS});
 }
 
 /**
@@ -1088,9 +1091,11 @@ void run(void) {
  * except if no other client is on that desktop.
  */
 void setfullscreen(Client *c, Desktop *d, Monitor *m, Bool fullscrn) {
-    if (fullscrn != c->isfull) XChangeProperty(dis, c->win,
-            netatoms[NET_WM_STATE], XA_ATOM, 32, PropModeReplace, (unsigned char*)
-            ((c->isfull = fullscrn) ? &netatoms[NET_FULLSCREEN]:0), fullscrn);
+    if (fullscrn != c->isfull)
+        XChangeProperty(dis, c->win,
+            netatoms[NET_WM_STATE], XA_ATOM, 32, PropModeReplace,
+            (unsigned char*) ((c->isfull = fullscrn) ? &netatoms[NET_FULLSCREEN]:0),
+            fullscrn);
     if (fullscrn) XMoveResizeWindow(dis, c->win, m->x, m->y, m->w, m->h);
     XSetWindowBorderWidth(dis, c->win, (c->isfull || !d->head->next ? 0:BORDER_WIDTH));
 }
@@ -1117,7 +1122,7 @@ void setup(void) {
         monitors[m] = (Monitor){ .x = info[m].x_org, .y = info[m].y_org,
                                  .w = info[m].width, .h = info[m].height };
         for (unsigned int d = 0; d < DESKTOPS; d++)
-            monitors[m].desktops[d] = (Desktop){ .mode = DEFAULT_MODE };
+            monitors[m].desktops[d] = (Desktop){ .mode = DEFAULT_MODE, .sbar = SHOW_PANEL };
     }
     XFree(info);
 
@@ -1157,7 +1162,8 @@ void setup(void) {
     XSync(dis, False);
 
     grabkeys();
-    if (DEFAULT_DESKTOP >= 0 && DEFAULT_DESKTOP < DESKTOPS) change_desktop(&(Arg){.i = DEFAULT_DESKTOP});
+    if (DEFAULT_DESKTOP >= 0 && DEFAULT_DESKTOP < DESKTOPS)  change_desktop(&(Arg){.i = DEFAULT_DESKTOP});
+    if (DEFAULT_MONITOR >= 0 && DEFAULT_MONITOR < nmonitors) change_monitor(&(Arg){.i = DEFAULT_MONITOR});
 }
 
 void sigchld(__attribute__((unused)) int sig) {
@@ -1272,16 +1278,17 @@ void switch_mode(const Arg *arg) {
  */
 void tile(Desktop *d, Monitor *m) {
     if (!d->head || d->mode == FLOAT) return; /* nothing to arange */
-    layout[d->head->next ? d->mode:MONOCLE](m->x, m->y + (TOP_PANEL ? PANEL_HEIGHT:0),
-                                            m->w, m->h - (TOP_PANEL ? PANEL_HEIGHT:0), d);
+    layout[d->head->next ? d->mode:MONOCLE](m->x, m->y + (TOP_PANEL && d->sbar ? PANEL_HEIGHT:0),
+                                            m->w, m->h - (d->sbar ? PANEL_HEIGHT:0), d);
 }
 
 /**
  * toggle visibility state of the panel/bar
  */
 void togglepanel(void) {
-    desktops[currdeskidx].sbar = !desktops[currdeskidx].sbar;
-    tile(&desktops[currdeskidx]);
+    Monitor *m = &monitors[currmonidx];
+    m->desktops[m->currdeskidx].sbar = !m->desktops[m->currdeskidx].sbar;
+    tile(&m->desktops[m->currdeskidx], m);
 }
 
 /**
