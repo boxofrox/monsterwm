@@ -23,7 +23,8 @@
 enum { RESIZE, MOVE };
 enum { TILE, MONOCLE, BSTACK, GRID, FLOAT, MODES };
 enum { WM_PROTOCOLS, WM_DELETE_WINDOW, WM_COUNT };
-enum { NET_SUPPORTED, NET_FULLSCREEN, NET_WM_STATE, NET_ACTIVE, NET_COUNT };
+enum { NET_SUPPORTED, NET_FULLSCREEN, NET_WM_STATE, NET_ACTIVE, NET_FULLSCREEN_MONITORS, NET_COUNT };
+enum { TOP, BOTTOM, LEFT, RIGHT };
 
 /**
  * argument structure to be passed to function by config.h
@@ -121,8 +122,9 @@ static void togglepanel();
  */
 typedef struct Client {
     struct Client *next;
-    Bool isurgn, isfull, isfloat, istrans;
+    Bool isurgn, isfull, isfloat, istrans, isfullmonitors;
     Window win;
+    int fullscreen_monitors[4];
 } Client;
 
 /**
@@ -155,6 +157,10 @@ typedef struct Monitor {
     Desktop desktops[DESKTOPS];
 } Monitor;
 
+typedef struct {
+    long x, y, w, h;
+} Rect;
+
 /* hidden function prototypes sorted alphabetically */
 static Client* addwindow(Window w, Desktop *d);
 static void buttonpress(XEvent *e);
@@ -168,17 +174,23 @@ static void enternotify(XEvent *e);
 static void focus(Client *c, Desktop *d, Monitor *m);
 static void focusin(XEvent *e);
 static unsigned long getcolor(const char* color, const int screen);
+static void getfullscreenrect(Rect *dest, Client *c, Monitor *m);
+static void getrectfrommonitor (Rect *dest, Monitor *m);
 static void grabbuttons(Client *c);
 static void grabkeys(void);
 static void grid(int x, int y, int w, int h, const Desktop *d);
 static void keypress(XEvent *e);
+static long longmin (long a, long b);
+static long longmax (long a, long b);
 static void maprequest(XEvent *e);
 static void monocle(int x, int y, int w, int h, const Desktop *d);
 static Client* prevclient(Client *c, Desktop *d);
 static void propertynotify(XEvent *e);
+static void rectunion (Rect *dest, Rect *a, Rect *b);
 static void removeclient(Client *c, Desktop *d, Monitor *m);
 static void run(void);
 static void setfullscreen(Client *c, Desktop *d, Monitor *m, Bool fullscrn);
+static void setfullscreenmonitors(Client *c, Desktop *d, Monitor *m, int top, int bottom, int left, int right);
 static void setup(void);
 static void sigchld(int sig);
 static void stack(int x, int y, int w, int h, const Desktop *d);
@@ -216,11 +228,11 @@ static Monitor *monitors;
  * call the appropriate handler function
  */
 static void (*events[LASTEvent])(XEvent *e) = {
-    [KeyPress]         = keypress,     [EnterNotify]    = enternotify,
-    [MapRequest]       = maprequest,   [ClientMessage]  = clientmessage,
-    [ButtonPress]      = buttonpress,  [DestroyNotify]  = destroynotify,
-    [UnmapNotify]      = unmapnotify,  [PropertyNotify] = propertynotify,
-    [ConfigureRequest] = configurerequest,    [FocusIn] = focusin,
+    [KeyPress]         = keypress,          [EnterNotify]    = enternotify,
+    [MapRequest]       = maprequest,        [ClientMessage]  = clientmessage,
+    [ButtonPress]      = buttonpress,       [DestroyNotify]  = destroynotify,
+    [UnmapNotify]      = unmapnotify,       [PropertyNotify] = propertynotify,
+    [ConfigureRequest] = configurerequest,  [FocusIn]        = focusin,
 };
 
 /**
@@ -416,14 +428,25 @@ void client_to_monitor(const Arg *arg) {
  */
 void clientmessage(XEvent *e) {
     Monitor *m = NULL; Desktop *d = NULL; Client *c = NULL;
-    if (!wintoclient(e->xclient.window, &c, &d, &m)) return;
+
+    if (!wintoclient(e->xclient.window, &c, &d, &m))
+        return;
 
     if (e->xclient.message_type        == netatoms[NET_WM_STATE] && (
         (unsigned)e->xclient.data.l[1] == netatoms[NET_FULLSCREEN]
      || (unsigned)e->xclient.data.l[2] == netatoms[NET_FULLSCREEN])) {
         setfullscreen(c, d, m, (e->xclient.data.l[0] == 1 || (e->xclient.data.l[0] == 2 && !c->isfull)));
         if (!(c->isfloat || c->istrans) || !d->head->next) tile(d, m);
-    } else if (e->xclient.message_type == netatoms[NET_ACTIVE]) focus(c, d, m);
+    }
+    else if (e->xclient.message_type == netatoms[NET_ACTIVE]) {
+        focus(c, d, m);
+    }
+    else if (e->xclient.message_type   == netatoms[NET_FULLSCREEN_MONITORS]) {
+        setfullscreenmonitors(c, d, m, (int)e->xclient.data.l[0] /* top */,
+                                       (int)e->xclient.data.l[1] /* bottom */,
+                                       (int)e->xclient.data.l[2] /* left */,
+                                       (int)e->xclient.data.l[3] /* right */);
+    }
 }
 
 /**
@@ -673,6 +696,41 @@ unsigned long getcolor(const char* color, const int screen) {
 }
 
 /**
+ */
+void getfullscreenrect(Rect *dest, Client *c, Monitor *m) {
+    Rect r;
+
+    XChangeProperty(dis, c->win,
+        netatoms[NET_WM_STATE], XA_ATOM, 32, PropModeReplace,
+        (unsigned char*) (c->isfull ? &netatoms[NET_FULLSCREEN]:0),
+        c->isfull);
+
+    if (c->isfull) {
+        if (c->isfullmonitors) {
+            getrectfrommonitor(dest, &monitors[0]);
+
+            for (int a = 1; a < nmonitors; ++a) {
+                getrectfrommonitor(&r, &monitors[a]);
+                rectunion(dest, dest, &r);
+            }
+        }
+        else {
+            getrectfrommonitor(dest, m);
+        }
+    }
+}
+
+/**
+ *
+ */
+void getrectfrommonitor (Rect *dest, Monitor *m) {
+    dest->x = (long) m->x;
+    dest->y = (long) m->y;
+    dest->w = (long) m->w;
+    dest->h = (long) m->h;
+}
+
+/**
  * register button bindings to be notified of
  * when they occur.
  * the wm listens to those button bindings and
@@ -763,6 +821,18 @@ void killclient(void) {
  */
 void last_desktop(void) {
     change_desktop(&(Arg){.i = monitors[currmonidx].prevdeskidx});
+}
+
+/**
+ */
+long longmin (long a, long b) {
+    return (a < b) ? a : b;
+}
+
+/**
+ */
+long longmax (long a, long b) {
+    return (a > b) ? a : b;
 }
 
 /**
@@ -1016,6 +1086,16 @@ void quit(const Arg *arg) {
 }
 
 /**
+ * construct new rectangle bounds that include rectangles A and B.
+ */
+void rectunion (Rect *dest, Rect *a, Rect *b) {
+    dest->x = longmin(a->x, b->x);
+    dest->y = longmin(a->y, b->y);
+    dest->w = longmax(a->w, b->w);
+    dest->h = longmax(a->h, b->h);
+}
+
+/**
  * remove the specified client from the given desktop
  *
  * if c was the previous client, previous must be updated.
@@ -1091,13 +1171,66 @@ void run(void) {
  * except if no other client is on that desktop.
  */
 void setfullscreen(Client *c, Desktop *d, Monitor *m, Bool fullscrn) {
+    Rect r;
+
     if (fullscrn != c->isfull)
         XChangeProperty(dis, c->win,
             netatoms[NET_WM_STATE], XA_ATOM, 32, PropModeReplace,
             (unsigned char*) ((c->isfull = fullscrn) ? &netatoms[NET_FULLSCREEN]:0),
             fullscrn);
-    if (fullscrn) XMoveResizeWindow(dis, c->win, m->x, m->y, m->w, m->h);
+    if (fullscrn) {
+        getfullscreenrect(&r, c, m);
+        XMoveResizeWindow(dis, c->win, r.x, r.y, r.w, r.h);
+    }
     XSetWindowBorderWidth(dis, c->win, (c->isfull || !d->head->next ? 0:BORDER_WIDTH));
+}
+
+/**
+ * set the fullscreen multihead state of a client
+ *
+ * if a client gets fullscreen across monitors, resize it
+ * to cover all screen space.
+ * the border should be zero (0).
+ *
+ * if a client is reset from fullscreen,
+ * the boarder should be BORDER_WIDTH,
+ * except if no other client is on that desktop.
+ */
+void setfullscreenmonitors(Client *c, Desktop *d, Monitor *m, int top, int bottom, int left, int right) {
+    if (top     >= 0    && top    < nmonitors   &&
+        bottom  >= 0    && bottom < nmonitors   &&
+        left    >= 0    && left   < nmonitors   &&
+        right   >= 0    && right  < nmonitors)
+    {
+        c->fullscreen_monitors[TOP]     = top;
+        c->fullscreen_monitors[BOTTOM]  = bottom;
+        c->fullscreen_monitors[LEFT]    = left;
+        c->fullscreen_monitors[RIGHT]   = right;
+        c->isfullmonitors = True;
+    }
+    else {
+        c->fullscreen_monitors[TOP]     = 0;
+        c->fullscreen_monitors[BOTTOM]  = 0;
+        c->fullscreen_monitors[LEFT]    = 0;
+        c->fullscreen_monitors[RIGHT]   = 0;
+        c->isfullmonitors = False;
+    }
+
+    if (c->isfull)
+        setfullscreen(c, d, m, c->isfull);
+
+    if (c->isfullmonitors) {
+        long data[4] = { 0 };
+
+        data[TOP]       = (long) c->fullscreen_monitors[TOP];
+        data[BOTTOM]    = (long) c->fullscreen_monitors[BOTTOM];
+        data[LEFT]      = (long) c->fullscreen_monitors[LEFT];
+        data[RIGHT]     = (long) c->fullscreen_monitors[RIGHT];
+
+        XChangeProperty(dis, c->win,
+            netatoms[NET_FULLSCREEN_MONITORS], XA_CARDINAL, 32, PropModeReplace,
+            (unsigned char *) data, 4);
+    }
 }
 
 /**
@@ -1145,6 +1278,8 @@ void setup(void) {
     netatoms[NET_WM_STATE]    = XInternAtom(dis, "_NET_WM_STATE",    False);
     netatoms[NET_ACTIVE]      = XInternAtom(dis, "_NET_ACTIVE_WINDOW",       False);
     netatoms[NET_FULLSCREEN]  = XInternAtom(dis, "_NET_WM_STATE_FULLSCREEN", False);
+
+    netatoms[NET_FULLSCREEN_MONITORS] = XInternAtom(dis, "_NET_WM_FULLSCREEN_MONITORS", False);
 
     /* propagate EWMH support */
     XChangeProperty(dis, root, netatoms[NET_SUPPORTED], XA_ATOM, 32,
